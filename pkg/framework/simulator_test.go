@@ -164,7 +164,7 @@ func TestPrediction(t *testing.T) {
 	}{
 		{
 			name:     "Limit reached fail type",
-			failType: "LimitReached",
+			failType: "ReplicasScheduled",
 			limit:    6,
 			nodes:    setupNodes(),
 		},
@@ -215,6 +215,7 @@ func TestPrediction(t *testing.T) {
 					},
 				},
 			}
+			replicatedPods := []*ReplicatedPod{{Replicas: test.limit, Pod: simulatedPod}}
 
 			// 2. create predictor
 			// - create simple configuration file for scheduler (use the default values or from systemd env file if reasonable)
@@ -254,10 +255,7 @@ func TestPrediction(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			cc, err := New(kubeSchedulerConfig,
-				simulatedPod,
-				test.limit,
-			)
+			cc, err := New(kubeSchedulerConfig, replicatedPods)
 
 			if err != nil {
 				t.Errorf("Unexpected error: %v", err)

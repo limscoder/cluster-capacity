@@ -18,10 +18,10 @@ package options
 
 import (
 	"fmt"
-	"io"
-	"net/http"
+	"k8s.io/api/extensions/v1beta1"
 	"os"
 	"path/filepath"
+	"sigs.k8s.io/cluster-capacity/pkg/framework"
 	"strings"
 
 	"github.com/spf13/pflag"
@@ -35,17 +35,17 @@ import (
 )
 
 type ClusterCapacityConfig struct {
-	Pod        *v1.Pod
-	KubeClient clientset.Interface
-	Options    *ClusterCapacityOptions
+	Pod            *v1.Pod
+	ReplicatedPods []*framework.ReplicatedPod
+	KubeClient     clientset.Interface
+	Options        *ClusterCapacityOptions
 }
 
 type ClusterCapacityOptions struct {
 	Kubeconfig                 string
 	DefaultSchedulerConfigFile string
-	MaxLimit                   int
 	Verbose                    bool
-	PodSpecFile                string
+	ReplicaSetFiles            []string
 	OutputFormat               string
 }
 
@@ -61,8 +61,7 @@ func NewClusterCapacityOptions() *ClusterCapacityOptions {
 
 func (s *ClusterCapacityOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&s.Kubeconfig, "kubeconfig", s.Kubeconfig, "Path to the kubeconfig file to use for the analysis.")
-	fs.StringVar(&s.PodSpecFile, "podspec", s.PodSpecFile, "Path to JSON or YAML file containing pod definition.")
-	fs.IntVar(&s.MaxLimit, "max-limit", 0, "Number of instances of pod to be scheduled after which analysis stops. By default unlimited.")
+	fs.StringArrayVar(&s.ReplicaSetFiles, "replicaset", s.ReplicaSetFiles, "Path to JSON or YAML file containing replicaset definition.")
 
 	//TODO(jchaloup): uncomment this line once the multi-schedulers are fully implemented
 	//fs.StringArrayVar(&s.SchedulerConfigFile, "config", s.SchedulerConfigFile, "Paths to files containing scheduler configuration in JSON or YAML format")
@@ -74,61 +73,74 @@ func (s *ClusterCapacityOptions) AddFlags(fs *pflag.FlagSet) {
 }
 
 func (s *ClusterCapacityConfig) ParseAPISpec(schedulerName string) error {
-	var spec io.Reader
-	var err error
-	if strings.HasPrefix(s.Options.PodSpecFile, "http://") || strings.HasPrefix(s.Options.PodSpecFile, "https://") {
-		response, err := http.Get(s.Options.PodSpecFile)
-		if err != nil {
-			return err
-		}
-		defer response.Body.Close()
-		if response.StatusCode != http.StatusOK {
-			return fmt.Errorf("unable to read URL %q, server reported %v, status code=%v", s.Options.PodSpecFile, response.Status, response.StatusCode)
-		}
-		spec = response.Body
-	} else {
-		filename, _ := filepath.Abs(s.Options.PodSpecFile)
-		spec, err = os.Open(filename)
-		if err != nil {
-			return fmt.Errorf("Failed to open config file: %v", err)
-		}
-	}
-
-	decoder := yaml.NewYAMLOrJSONDecoder(spec, 4096)
-	versionedPod := &v1.Pod{}
-	err = decoder.Decode(versionedPod)
+	replicaCfgs, err := s.replicaConfigs(schedulerName)
 	if err != nil {
-		return fmt.Errorf("Failed to decode config file: %v", err)
+		return err
+	}
+	s.ReplicatedPods = replicaCfgs
+	return nil
+}
+
+func (s *ClusterCapacityConfig) replicaConfigs(schedulerName string) ([]*framework.ReplicatedPod, error) {
+	replicatedPods := make([]*framework.ReplicatedPod, len(s.Options.ReplicaSetFiles), len(s.Options.ReplicaSetFiles))
+	for i, replicaSetFile := range s.Options.ReplicaSetFiles {
+		filename, _ := filepath.Abs(replicaSetFile)
+		spec, err := os.Open(filename)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to open replicaset file: %v", err)
+		}
+
+		decoder := yaml.NewYAMLOrJSONDecoder(spec, 4096)
+		replicaSet := &v1beta1.ReplicaSet{}
+		err = decoder.Decode(replicaSet)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to decode replicaset file: %v", err)
+		}
+
+		pod, err := s.newReplicatedPod(schedulerName, replicaSet)
+		if err != nil {
+			return nil, err
+		}
+
+		replicatedPods[i] = pod
 	}
 
-	if versionedPod.ObjectMeta.Namespace == "" {
-		versionedPod.ObjectMeta.Namespace = "default"
+	return replicatedPods, nil
+}
+
+func (s *ClusterCapacityConfig) newReplicatedPod(schedulerName string, replicaSet *v1beta1.ReplicaSet) (*framework.ReplicatedPod, error) {
+	pod := &v1.Pod{
+		ObjectMeta: replicaSet.Spec.Template.ObjectMeta,
+		Spec:       replicaSet.Spec.Template.Spec,
+	}
+	if pod.ObjectMeta.Namespace == "" {
+		pod.ObjectMeta.Namespace = "default"
 	}
 
 	// set pod's scheduler name to cluster-capacity
-	if versionedPod.Spec.SchedulerName == "" {
-		versionedPod.Spec.SchedulerName = schedulerName
+	if pod.Spec.SchedulerName == "" {
+		pod.Spec.SchedulerName = schedulerName
 	}
 
 	// hardcoded from kube api defaults and validation
 	// TODO: rewrite when object validation gets more available for non kubectl approaches in kube
-	if versionedPod.Spec.DNSPolicy == "" {
-		versionedPod.Spec.DNSPolicy = v1.DNSClusterFirst
+	if pod.Spec.DNSPolicy == "" {
+		pod.Spec.DNSPolicy = v1.DNSClusterFirst
 	}
-	if versionedPod.Spec.RestartPolicy == "" {
-		versionedPod.Spec.RestartPolicy = v1.RestartPolicyAlways
+	if pod.Spec.RestartPolicy == "" {
+		pod.Spec.RestartPolicy = v1.RestartPolicyAlways
 	}
 
-	for i := range versionedPod.Spec.Containers {
-		if versionedPod.Spec.Containers[i].TerminationMessagePolicy == "" {
-			versionedPod.Spec.Containers[i].TerminationMessagePolicy = v1.TerminationMessageFallbackToLogsOnError
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].TerminationMessagePolicy == "" {
+			pod.Spec.Containers[i].TerminationMessagePolicy = v1.TerminationMessageFallbackToLogsOnError
 		}
 	}
 
 	// TODO: client side validation seems like a long term problem for this command.
 	internalPod := &api.Pod{}
-	if err := apiv1.Convert_v1_Pod_To_core_Pod(versionedPod, internalPod, nil); err != nil {
-		return fmt.Errorf("unable to convert to internal version: %#v", err)
+	if err := apiv1.Convert_v1_Pod_To_core_Pod(pod, internalPod, nil); err != nil {
+		return nil, fmt.Errorf("unable to convert to internal version: %#v", err)
 
 	}
 	if errs := validation.ValidatePodCreate(internalPod, validation.PodValidationOptions{}); len(errs) > 0 {
@@ -136,9 +148,16 @@ func (s *ClusterCapacityConfig) ParseAPISpec(schedulerName string) error {
 		for _, err := range errs {
 			errStrs = append(errStrs, fmt.Sprintf("%v: %v", err.Type, err.Field))
 		}
-		return fmt.Errorf("Invalid pod: %#v", strings.Join(errStrs, ", "))
+		return nil, fmt.Errorf("Invalid pod: %#v", strings.Join(errStrs, ", "))
 	}
 
-	s.Pod = versionedPod
-	return nil
+	replicas := 0
+	if replicaSet.Spec.Replicas != nil {
+		replicas = int(*replicaSet.Spec.Replicas)
+	}
+	return &framework.ReplicatedPod{
+		Replicas: replicas,
+		Pod: pod,
+		ScheduledPods: []*v1.Pod{},
+	}, nil
 }

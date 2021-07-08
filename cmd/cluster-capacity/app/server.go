@@ -81,8 +81,8 @@ func NewClusterCapacityCommand() *cobra.Command {
 }
 
 func Validate(opt *options.ClusterCapacityOptions) error {
-	if len(opt.PodSpecFile) == 0 {
-		return fmt.Errorf("Pod spec file is missing")
+	if len(opt.ReplicaSetFiles) == 0 {
+		return fmt.Errorf("ReplicaSet spec file is missing")
 	}
 
 	_, present := os.LookupEnv("CC_INCLUSTER")
@@ -175,7 +175,7 @@ func Run(opt *options.ClusterCapacityOptions) error {
 }
 
 func runSimulator(s *options.ClusterCapacityConfig, kubeSchedulerConfig *schedconfig.CompletedConfig) (*framework.ClusterCapacityReview, error) {
-	cc, err := framework.New(kubeSchedulerConfig, s.Pod, s.Options.MaxLimit)
+	cc, err := framework.New(kubeSchedulerConfig, s.ReplicatedPods)
 	if err != nil {
 		return nil, err
 	}

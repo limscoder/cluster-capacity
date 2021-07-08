@@ -45,10 +45,6 @@ type ClusterCapacityReviewSpec struct {
 	// the pod desired for scheduling
 	Templates []v1.Pod `json:"templates"`
 
-	// desired number of replicas that should be scheduled
-	// +optional
-	Replicas int32 `json:"replicas"`
-
 	PodRequirements []*Requirements `json:"podRequirements"`
 }
 
@@ -89,6 +85,7 @@ type Resources struct {
 type Requirements struct {
 	PodName       string            `json:"podName"`
 	Resources     *Resources        `json:"resources"`
+	Limits        *Resources        `json:"limits"`
 	NodeSelectors map[string]string `json:"nodeSelectors"`
 }
 
@@ -109,38 +106,61 @@ func getMainFailReason(message string) *ClusterCapacityReviewScheduleFailReason 
 }
 
 func getResourceRequest(pod *v1.Pod) *Resources {
-	result := Resources{
+	result := newResources()
+	for _, container := range pod.Spec.Containers {
+		appendResources(result, container.Resources.Requests)
+	}
+	return result
+}
+
+func getResourceLimit(pod *v1.Pod) *Resources {
+	result := newResources()
+	for _, container := range pod.Spec.Containers {
+		appendResources(result, container.Resources.Limits)
+	}
+	return result
+}
+
+func newResources() *Resources {
+	return &Resources{
 		PrimaryResources: v1.ResourceList{
-			v1.ResourceName(v1.ResourceCPU):    *resource.NewMilliQuantity(0, resource.DecimalSI),
-			v1.ResourceName(v1.ResourceMemory): *resource.NewQuantity(0, resource.BinarySI),
-			v1.ResourceName(ResourceNvidiaGPU): *resource.NewMilliQuantity(0, resource.DecimalSI),
+			v1.ResourceName(v1.ResourceCPU):              *resource.NewMilliQuantity(0, resource.DecimalSI),
+			v1.ResourceName(v1.ResourceMemory):           *resource.NewQuantity(0, resource.BinarySI),
+			v1.ResourceName(v1.ResourceStorage):          *resource.NewQuantity(0, resource.BinarySI),
+			v1.ResourceName(v1.ResourceEphemeralStorage): *resource.NewQuantity(0, resource.BinarySI),
+			v1.ResourceName(ResourceNvidiaGPU):           *resource.NewMilliQuantity(0, resource.DecimalSI),
 		},
 	}
+}
 
-	for _, container := range pod.Spec.Containers {
-		for rName, rQuantity := range container.Resources.Requests {
-			switch rName {
-			case v1.ResourceMemory:
-				rQuantity.Add(*(result.PrimaryResources.Memory()))
-				result.PrimaryResources[v1.ResourceMemory] = rQuantity
-			case v1.ResourceCPU:
-				rQuantity.Add(*(result.PrimaryResources.Cpu()))
-				result.PrimaryResources[v1.ResourceCPU] = rQuantity
-				//case v1.ResourceNvidiaGPU:
-				//	rQuantity.Add(*(result.PrimaryResources.NvidiaGPU()))
-				//	result.PrimaryResources[v1.ResourceNvidiaGPU] = rQuantity
-			default:
-				if schedutil.IsScalarResourceName(rName) {
-					// Lazily allocate this map only if required.
-					if result.ScalarResources == nil {
-						result.ScalarResources = map[v1.ResourceName]int64{}
-					}
-					result.ScalarResources[rName] += rQuantity.Value()
+func appendResources(dest *Resources, src v1.ResourceList) {
+	for rName, rQuantity := range src {
+		switch rName {
+		case v1.ResourceMemory:
+			rQuantity.Add(*(dest.PrimaryResources.Memory()))
+			dest.PrimaryResources[v1.ResourceMemory] = rQuantity
+		case v1.ResourceCPU:
+			rQuantity.Add(*(dest.PrimaryResources.Cpu()))
+			dest.PrimaryResources[v1.ResourceCPU] = rQuantity
+		case v1.ResourceEphemeralStorage:
+			rQuantity.Add(*(dest.PrimaryResources.StorageEphemeral()))
+			dest.PrimaryResources[v1.ResourceEphemeralStorage] = rQuantity
+		case v1.ResourceStorage:
+			rQuantity.Add(*(dest.PrimaryResources.Storage()))
+			dest.PrimaryResources[v1.ResourceStorage] = rQuantity
+			//case v1.ResourceNvidiaGPU:
+			//	rQuantity.Add(*(result.PrimaryResources.NvidiaGPU()))
+			//	result.PrimaryResources[v1.ResourceNvidiaGPU] = rQuantity
+		default:
+			if schedutil.IsScalarResourceName(rName) {
+				// Lazily allocate this map only if required.
+				if dest.ScalarResources == nil {
+					dest.ScalarResources = map[v1.ResourceName]int64{}
 				}
+				dest.ScalarResources[rName] += rQuantity.Value()
 			}
 		}
 	}
-	return &result
 }
 
 func parsePodsReview(templatePods []*v1.Pod, status Status) []*ClusterCapacityReviewResult {
@@ -185,6 +205,7 @@ func getPodsRequirements(pods []*v1.Pod) []*Requirements {
 		podRequirements := &Requirements{
 			PodName:       pod.Name,
 			Resources:     getResourceRequest(pod),
+			Limits:        getResourceLimit(pod),
 			NodeSelectors: pod.Spec.NodeSelector,
 		}
 		result = append(result, podRequirements)
@@ -199,7 +220,6 @@ func deepCopyPods(in []*v1.Pod, out []v1.Pod) {
 }
 
 func getReviewSpec(podTemplates []*v1.Pod) ClusterCapacityReviewSpec {
-
 	podCopies := make([]v1.Pod, len(podTemplates))
 	deepCopyPods(podTemplates, podCopies)
 	return ClusterCapacityReviewSpec{
@@ -235,15 +255,11 @@ func instancesSum(replicasOnNodes []*ReplicasOnNode) int {
 func clusterCapacityReviewPrettyPrint(r *ClusterCapacityReview, verbose bool) {
 	if verbose {
 		for _, req := range r.Spec.PodRequirements {
-			fmt.Printf("%v pod requirements:\n", req.PodName)
-			fmt.Printf("\t- CPU: %v\n", req.Resources.PrimaryResources.Cpu().String())
-			fmt.Printf("\t- Memory: %v\n", req.Resources.PrimaryResources.Memory().String())
-			//if !req.Resources.PrimaryResources.NvidiaGPU().IsZero() {
-			//	fmt.Printf("\t- NvidiaGPU: %v\n", req.Resources.PrimaryResources.NvidiaGPU().String())
-			//}
-			if req.Resources.ScalarResources != nil {
-				fmt.Printf("\t- ScalarResources: %v\n", req.Resources.ScalarResources)
-			}
+			fmt.Printf("%v\n", req.PodName)
+			fmt.Printf("\trequests:\n")
+			printResources(req.Resources)
+			fmt.Printf("\tlimits:\n")
+			printResources(req.Limits)
 
 			if req.NodeSelectors != nil {
 				fmt.Printf("\t- NodeSelector: %v\n", labels.SelectorFromSet(labels.Set(req.NodeSelectors)).String())
@@ -281,6 +297,26 @@ func clusterCapacityReviewPrettyPrint(r *ClusterCapacityReview, verbose bool) {
 				fmt.Printf("\t- %v: %v instance(s)\n", ron.NodeName, ron.Replicas)
 			}
 		}
+	}
+}
+
+func printResources(resources *Resources) {
+	fmt.Printf("\t\t- CPU: %v\n", resources.PrimaryResources.Cpu().String())
+	fmt.Printf("\t\t- Memory: %v\n", resources.PrimaryResources.Memory().String())
+
+	if resources.PrimaryResources.Storage() != nil {
+		fmt.Printf("\t\t- Storage: %v\n", resources.PrimaryResources.Storage().String())
+	}
+
+	if resources.PrimaryResources.StorageEphemeral() != nil {
+		fmt.Printf("\t\t- Ephemeral Storage: %v\n", resources.PrimaryResources.StorageEphemeral().String())
+	}
+
+	//if !req.Resources.PrimaryResources.NvidiaGPU().IsZero() {
+	//	fmt.Printf("\t- NvidiaGPU: %v\n", req.Resources.PrimaryResources.NvidiaGPU().String())
+	//}
+	if resources.ScalarResources != nil {
+		fmt.Printf("\t\t- ScalarResources: %v\n", resources.ScalarResources)
 	}
 }
 
