@@ -19,6 +19,7 @@ package framework
 import (
 	"encoding/json"
 	"fmt"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 	"strings"
 	"time"
 
@@ -56,15 +57,26 @@ type ClusterCapacityReviewStatus struct {
 	FailReason *ClusterCapacityReviewScheduleFailReason `json:"failReason"`
 
 	// per node information about the scheduling simulation
-	Pods []*ClusterCapacityReviewResult `json:"pods"`
+	Pods  []*ClusterCapacityPodResult  `json:"pods"`
+	Nodes []*ClusterCapacityNodeResult `json:"nodes"`
 }
 
-type ClusterCapacityReviewResult struct {
+type ClusterCapacityPodResult struct {
 	PodName string `json:"podName"`
 	// numbers of replicas on nodes
 	ReplicasOnNodes []*ReplicasOnNode `json:"replicasOnNodes"`
 	// reason why no more pods could schedule (if any on this node)
 	FailSummary []FailReasonSummary `json:"failSummary"`
+}
+
+type NodeMap map[string]*framework.NodeInfo
+
+type ClusterCapacityNodeResult struct {
+	NodeName    string              `json:"nodeName"`
+	PodCount    int                 `json:"podCount"`
+	Allocatable *framework.Resource `json:"allocatable"`
+	Requested   *framework.Resource `json:"requested"`
+	Limits      *framework.Resource `json:"limits"`
 }
 
 type ReplicasOnNode struct {
@@ -126,7 +138,6 @@ func newResources() *Resources {
 		PrimaryResources: v1.ResourceList{
 			v1.ResourceName(v1.ResourceCPU):              *resource.NewMilliQuantity(0, resource.DecimalSI),
 			v1.ResourceName(v1.ResourceMemory):           *resource.NewQuantity(0, resource.BinarySI),
-			v1.ResourceName(v1.ResourceStorage):          *resource.NewQuantity(0, resource.BinarySI),
 			v1.ResourceName(v1.ResourceEphemeralStorage): *resource.NewQuantity(0, resource.BinarySI),
 			v1.ResourceName(ResourceNvidiaGPU):           *resource.NewMilliQuantity(0, resource.DecimalSI),
 		},
@@ -163,12 +174,37 @@ func appendResources(dest *Resources, src v1.ResourceList) {
 	}
 }
 
-func parsePodsReview(templatePods []*v1.Pod, status Status) []*ClusterCapacityReviewResult {
+func parseNodesReview(nodes NodeMap) []*ClusterCapacityNodeResult {
+	result := make([]*ClusterCapacityNodeResult, len(nodes), len(nodes))
+	i := 0
+	for key, node := range nodes {
+		limits := newResources()
+		for _, pod := range node.Pods {
+			appendResources(limits, getResourceLimit(pod.Pod).PrimaryResources)
+		}
+		result[i] = &ClusterCapacityNodeResult{
+			NodeName:    key,
+			PodCount:    len(node.Pods),
+			Allocatable: node.Allocatable,
+			Requested:   node.Requested,
+			Limits: &framework.Resource{
+				MilliCPU:         limits.PrimaryResources.Cpu().MilliValue(),
+				Memory:           limits.PrimaryResources.Memory().Value(),
+				EphemeralStorage: limits.PrimaryResources.StorageEphemeral().Value(),
+				ScalarResources:  limits.ScalarResources,
+			},
+		}
+		i++
+	}
+	return result
+}
+
+func parsePodsReview(templatePods []*v1.Pod, status Status) []*ClusterCapacityPodResult {
 	templatesCount := len(templatePods)
-	result := make([]*ClusterCapacityReviewResult, 0)
+	result := make([]*ClusterCapacityPodResult, 0)
 
 	for i := 0; i < templatesCount; i++ {
-		result = append(result, &ClusterCapacityReviewResult{
+		result = append(result, &ClusterCapacityPodResult{
 			ReplicasOnNodes: make([]*ReplicasOnNode, 0),
 			PodName:         templatePods[i].Name,
 		})
@@ -228,19 +264,20 @@ func getReviewSpec(podTemplates []*v1.Pod) ClusterCapacityReviewSpec {
 	}
 }
 
-func getReviewStatus(pods []*v1.Pod, status Status) ClusterCapacityReviewStatus {
+func getReviewStatus(pods []*v1.Pod, nodes NodeMap, status Status) ClusterCapacityReviewStatus {
 	return ClusterCapacityReviewStatus{
 		CreationTimestamp: time.Now(),
 		Replicas:          int32(len(status.Pods)),
 		FailReason:        getMainFailReason(status.StopReason),
 		Pods:              parsePodsReview(pods, status),
+		Nodes:             parseNodesReview(nodes),
 	}
 }
 
-func GetReport(pods []*v1.Pod, status Status) *ClusterCapacityReview {
+func GetReport(pods []*v1.Pod, nodes NodeMap, status Status) *ClusterCapacityReview {
 	return &ClusterCapacityReview{
 		Spec:   getReviewSpec(pods),
-		Status: getReviewStatus(pods, status),
+		Status: getReviewStatus(pods, nodes, status),
 	}
 }
 
@@ -297,16 +334,60 @@ func clusterCapacityReviewPrettyPrint(r *ClusterCapacityReview, verbose bool) {
 				fmt.Printf("\t- %v: %v instance(s)\n", ron.NodeName, ron.Replicas)
 			}
 		}
+		printNodeCapacity(r.Status.Nodes)
+		printClusterCapacity(r.Status.Nodes)
 	}
+}
+
+func printClusterCapacity(nodes []*ClusterCapacityNodeResult) {
+	var (
+		clusterCPUAllocatable, clusterCPURequested, clusterCPULimit,
+		clusterMemoryAllocatable, clusterMemoryRequested, clusterMemoryLimit,
+		clusterStorageAllocatable, clusterStorageRequested, clusterStorageLimit int64
+	)
+
+	for _, node := range nodes {
+		clusterCPUAllocatable += node.Allocatable.MilliCPU
+		clusterCPURequested += node.Requested.MilliCPU
+		clusterCPULimit += node.Limits.MilliCPU
+		clusterMemoryAllocatable += node.Allocatable.Memory
+		clusterMemoryRequested += node.Requested.Memory
+		clusterMemoryLimit += node.Limits.Memory
+		clusterStorageAllocatable += node.Allocatable.EphemeralStorage
+		clusterStorageRequested += node.Requested.EphemeralStorage
+		clusterStorageLimit += node.Limits.EphemeralStorage
+	}
+
+	fmt.Printf("\nCluster capacity:\n")
+	printCapacity(clusterCPUAllocatable, clusterCPURequested, clusterCPULimit, "CPU", "m")
+	printCapacity(clusterMemoryAllocatable, clusterMemoryRequested, clusterMemoryLimit, "Memory", "bytes")
+	printCapacity(clusterStorageAllocatable, clusterStorageRequested, clusterStorageLimit, "EphemeralStorage", "bytes")
+}
+
+func printNodeCapacity(nodes []*ClusterCapacityNodeResult) {
+	fmt.Printf("\nNode capacities:\n")
+	for _, node := range nodes {
+		fmt.Printf("%s\n", node.NodeName)
+		fmt.Printf("\t- pod count: %v\n", node.PodCount)
+
+		printCapacity(node.Allocatable.MilliCPU, node.Requested.MilliCPU, node.Limits.MilliCPU, "CPU", "m")
+		printCapacity(node.Allocatable.Memory, node.Requested.Memory, node.Limits.Memory, "Memory", "bytes")
+		printCapacity(node.Allocatable.EphemeralStorage, node.Requested.EphemeralStorage, node.Limits.EphemeralStorage, "EphemeralStorage", "bytes")
+	}
+}
+
+func printCapacity(allocatable, requested, limit int64, label, unit string) {
+	cap := float64(requested) / float64(allocatable) * 100
+	fmt.Printf("\t- %s requested: %v%s/%v%s %.2f%% allocated\n",
+		label, requested, unit, allocatable, unit, cap)
+	commit := float64(limit) / float64(allocatable) * 100
+	fmt.Printf("\t- %s limited: %v%s/%v%s %.2f%% allocated\n",
+		label, limit, unit, allocatable, unit, commit)
 }
 
 func printResources(resources *Resources) {
 	fmt.Printf("\t\t- CPU: %v\n", resources.PrimaryResources.Cpu().String())
 	fmt.Printf("\t\t- Memory: %v\n", resources.PrimaryResources.Memory().String())
-
-	if resources.PrimaryResources.Storage() != nil {
-		fmt.Printf("\t\t- Storage: %v\n", resources.PrimaryResources.Storage().String())
-	}
 
 	if resources.PrimaryResources.StorageEphemeral() != nil {
 		fmt.Printf("\t\t- Ephemeral Storage: %v\n", resources.PrimaryResources.StorageEphemeral().String())

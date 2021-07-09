@@ -91,7 +91,8 @@ type Status struct {
 func (c *ClusterCapacity) Report() *ClusterCapacityReview {
 	if c.report == nil {
 		// Preparation before pod sequence scheduling is done
-		c.report = GetReport(c.podTemplates(), c.status)
+		dump := c.schedulers[c.defaultSchedulerName].SchedulerCache.Dump()
+		c.report = GetReport(c.podTemplates(), dump.Nodes, c.status)
 	}
 
 	return c.report
