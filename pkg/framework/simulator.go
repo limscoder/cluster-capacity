@@ -48,9 +48,14 @@ const (
 )
 
 type ReplicatedPod struct {
-	Replicas int
-	Pod      *v1.Pod
+	Replicas      int
+	Pod           *v1.Pod
 	ScheduledPods []*v1.Pod
+}
+
+type SimulatedNode struct {
+	NodeName string
+	Replicas int
 }
 
 type ClusterCapacity struct {
@@ -64,10 +69,14 @@ type ClusterCapacity struct {
 	schedulers           map[string]*scheduler.Scheduler
 	defaultSchedulerName string
 	defaultSchedulerConf *schedconfig.CompletedConfig
+
 	// pods to schedule
 	replicatedPods []*ReplicatedPod
-	status           Status
-	report           *ClusterCapacityReview
+	status         Status
+	report         *ClusterCapacityReview
+
+	// node configuration
+	simulatedNodes []*SimulatedNode
 
 	// analysis limitation
 	informerStopCh chan struct{}
@@ -315,11 +324,15 @@ func (c *ClusterCapacity) Run() error {
 	// Start all informers.
 	c.informerFactory.Start(c.informerStopCh)
 	c.informerFactory.WaitForCacheSync(c.informerStopCh)
-
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// TODO(jchaloup): remove all pods that are not scheduled yet
 	for _, scheduler := range c.schedulers {
+		err := c.simulateNodes(scheduler)
+		if err != nil {
+			return fmt.Errorf("failed to simulate node: %v", err)
+		}
+
 		go func() {
 			scheduler.Run(ctx)
 		}()
@@ -327,6 +340,7 @@ func (c *ClusterCapacity) Run() error {
 	// wait some time before at least nodes are populated
 	// TODO(jchaloup); find a better way how to do this or at least decrease it to <100ms
 	time.Sleep(100 * time.Millisecond)
+
 	// create the first simulated pod
 	err := c.nextPod()
 	if err != nil {
@@ -338,6 +352,23 @@ func (c *ClusterCapacity) Run() error {
 	<-c.stop
 	cancel()
 	close(c.stop)
+	return nil
+}
+
+func (c *ClusterCapacity) simulateNodes(scheduler *scheduler.Scheduler) error {
+	cachedNodes := scheduler.SchedulerCache.Dump().Nodes
+	for _, node := range c.simulatedNodes {
+		src, ok := cachedNodes[node.NodeName]
+		if !ok {
+			return fmt.Errorf("Simulated node source not found: %s", node.NodeName)
+		}
+		for i := 0; i <= node.Replicas; i++ {
+			simulated := src.Node().DeepCopy()
+			simulated.Name = fmt.Sprintf("%s.simulated.%v", simulated.Name, i)
+			scheduler.SchedulerCache.AddNode(simulated)
+		}
+	}
+
 	return nil
 }
 
@@ -427,7 +458,7 @@ func getRecorderFactory(cc *schedconfig.CompletedConfig) profile.RecorderFactory
 // Create new cluster capacity analysis
 // The analysis is completely independent of apiserver so no need
 // for kubeconfig nor for apiserver url
-func New(kubeSchedulerConfig *schedconfig.CompletedConfig, replicatedPods []*ReplicatedPod) (*ClusterCapacity, error) {
+func New(kubeSchedulerConfig *schedconfig.CompletedConfig, replicatedPods []*ReplicatedPod, simulatedNodes []*SimulatedNode) (*ClusterCapacity, error) {
 	client := fakeclientset.NewSimpleClientset()
 	sharedInformerFactory := informers.NewSharedInformerFactory(client, 0)
 
@@ -437,6 +468,7 @@ func New(kubeSchedulerConfig *schedconfig.CompletedConfig, replicatedPods []*Rep
 		strategy:           strategy.NewPredictiveStrategy(client),
 		externalkubeclient: client,
 		replicatedPods:     replicatedPods,
+		simulatedNodes: 	simulatedNodes,
 		stop:               make(chan struct{}),
 		informerFactory:    sharedInformerFactory,
 		informerStopCh:     make(chan struct{}),

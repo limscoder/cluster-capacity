@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"sigs.k8s.io/cluster-capacity/pkg/framework"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/pflag"
@@ -34,9 +35,11 @@ import (
 	"k8s.io/kubernetes/pkg/apis/core/validation"
 )
 
+const INPUT_SEPARATOR = ":"
+
 type ClusterCapacityConfig struct {
-	Pod            *v1.Pod
 	ReplicatedPods []*framework.ReplicatedPod
+	SimulatedNodes []*framework.SimulatedNode
 	KubeClient     clientset.Interface
 	Options        *ClusterCapacityOptions
 }
@@ -46,6 +49,7 @@ type ClusterCapacityOptions struct {
 	DefaultSchedulerConfigFile string
 	Verbose                    bool
 	ReplicaSetFiles            []string
+	SimulatedNodes             []string
 	OutputFormat               string
 }
 
@@ -62,6 +66,7 @@ func NewClusterCapacityOptions() *ClusterCapacityOptions {
 func (s *ClusterCapacityOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&s.Kubeconfig, "kubeconfig", s.Kubeconfig, "Path to the kubeconfig file to use for the analysis.")
 	fs.StringArrayVar(&s.ReplicaSetFiles, "replicaset", s.ReplicaSetFiles, "Path to JSON or YAML file containing replicaset definition.")
+	fs.StringArrayVar(&s.SimulatedNodes, "simulatenode", s.SimulatedNodes, "Simulate additional cluster nodes. Replicate a node by specifying a source node and count {SOURCE_NODE_NAME}:{SIMULATED_COUNT}.")
 
 	//TODO(jchaloup): uncomment this line once the multi-schedulers are fully implemented
 	//fs.StringArrayVar(&s.SchedulerConfigFile, "config", s.SchedulerConfigFile, "Paths to files containing scheduler configuration in JSON or YAML format")
@@ -78,6 +83,11 @@ func (s *ClusterCapacityConfig) ParseAPISpec(schedulerName string) error {
 		return err
 	}
 	s.ReplicatedPods = replicaCfgs
+	nodeCfgs, err := s.nodeConfigs()
+	if err != nil {
+		return err
+	}
+	s.SimulatedNodes = nodeCfgs
 	return nil
 }
 
@@ -156,8 +166,29 @@ func (s *ClusterCapacityConfig) newReplicatedPod(schedulerName string, replicaSe
 		replicas = int(*replicaSet.Spec.Replicas)
 	}
 	return &framework.ReplicatedPod{
-		Replicas: replicas,
-		Pod: pod,
+		Replicas:      replicas,
+		Pod:           pod,
 		ScheduledPods: []*v1.Pod{},
 	}, nil
+}
+
+func (s *ClusterCapacityConfig) nodeConfigs() ([]*framework.SimulatedNode, error) {
+	nodes := make([]*framework.SimulatedNode, len(s.Options.SimulatedNodes), len(s.Options.SimulatedNodes))
+	for i, node := range s.Options.SimulatedNodes {
+		parts := strings.Split(node, INPUT_SEPARATOR)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("Invalid simulated node input format: %s", node)
+		}
+
+		replicas, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return nil, err
+		}
+
+		nodes[i] = &framework.SimulatedNode{
+			NodeName: parts[0],
+			Replicas: replicas,
+		}
+	}
+	return nodes, nil
 }

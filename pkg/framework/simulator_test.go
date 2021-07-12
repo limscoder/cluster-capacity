@@ -255,7 +255,7 @@ func TestPrediction(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			cc, err := New(kubeSchedulerConfig, replicatedPods)
+			cc, err := New(kubeSchedulerConfig, replicatedPods, []*SimulatedNode{})
 
 			if err != nil {
 				t.Errorf("Unexpected error: %v", err)

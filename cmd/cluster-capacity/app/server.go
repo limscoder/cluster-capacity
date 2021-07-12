@@ -55,7 +55,7 @@ var (
 func NewClusterCapacityCommand() *cobra.Command {
 	opt := options.NewClusterCapacityOptions()
 	cmd := &cobra.Command{
-		Use:   "cluster-capacity --kubeconfig KUBECONFIG --podspec PODSPEC",
+		Use:   "cluster-capacity --kubeconfig KUBECONFIG --replicaset REPLICASETFILE",
 		Short: "Cluster-capacity is used for simulating scheduling of one or multiple pods",
 		Long:  clusterCapacityLong,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -82,7 +82,7 @@ func NewClusterCapacityCommand() *cobra.Command {
 
 func Validate(opt *options.ClusterCapacityOptions) error {
 	if len(opt.ReplicaSetFiles) == 0 {
-		return fmt.Errorf("ReplicaSet spec file is missing")
+		return fmt.Errorf("No ReplicaSets defined")
 	}
 
 	_, present := os.LookupEnv("CC_INCLUSTER")
@@ -175,7 +175,7 @@ func Run(opt *options.ClusterCapacityOptions) error {
 }
 
 func runSimulator(s *options.ClusterCapacityConfig, kubeSchedulerConfig *schedconfig.CompletedConfig) (*framework.ClusterCapacityReview, error) {
-	cc, err := framework.New(kubeSchedulerConfig, s.ReplicatedPods)
+	cc, err := framework.New(kubeSchedulerConfig, s.ReplicatedPods, s.SimulatedNodes)
 	if err != nil {
 		return nil, err
 	}
