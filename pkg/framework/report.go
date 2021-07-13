@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"sort"
 	"strings"
 	"time"
 
@@ -175,9 +176,18 @@ func appendResources(dest *Resources, src v1.ResourceList) {
 }
 
 func parseNodesReview(nodes NodeMap) []*ClusterCapacityNodeResult {
+	// sort nodes by name
+	nodeNames := make([]string, len(nodes), len(nodes))
+	nodeIdx := 0
+	for key, _ := range nodes {
+		nodeNames[nodeIdx] = key
+		nodeIdx++
+	}
+	sort.Strings(nodeNames)
+
 	result := make([]*ClusterCapacityNodeResult, len(nodes), len(nodes))
-	i := 0
-	for key, node := range nodes {
+	for i, key := range nodeNames {
+		node := nodes[key]
 		limits := newResources()
 		for _, pod := range node.Pods {
 			appendResources(limits, getResourceLimit(pod.Pod).PrimaryResources)
@@ -194,7 +204,6 @@ func parseNodesReview(nodes NodeMap) []*ClusterCapacityNodeResult {
 				ScalarResources:  limits.ScalarResources,
 			},
 		}
-		i++
 	}
 	return result
 }
