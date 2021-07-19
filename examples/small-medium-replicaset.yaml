@@ -1,0 +1,62 @@
+---
+apiVersion: v1
+kind: replicaset
+metadata:
+  name: small-replicaset
+  labels:
+    app: capacity
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: capacity
+  template:
+    metadata:
+      name: small-pod
+      labels:
+        app: capacity
+    spec:
+      containers:
+      - name: php-redis
+        image: gcr.io/google-samples/gb-frontend:v4
+        imagePullPolicy: Always
+        resources:
+          limits:
+            cpu: 300m
+            memory: 200Mi
+          requests:
+            cpu: 150m
+            memory: 100Mi
+      restartPolicy: "OnFailure"
+      dnsPolicy: "Default"
+---
+apiVersion: v1
+kind: replicaset
+metadata:
+  name: medium-replicaset
+  labels:
+    app: capacity
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: capacity
+  template:
+    metadata:
+      name: medium-pod
+      labels:
+        app: capacity
+    spec:
+      containers:
+        - name: php-redis
+          image: gcr.io/google-samples/gb-frontend:v4
+          imagePullPolicy: Always
+          resources:
+            limits:
+              cpu: 600m
+              memory: 400Mi
+            requests:
+              cpu: 300m
+              memory: 200Mi
+      restartPolicy: "OnFailure"
+      dnsPolicy: "Default"

@@ -18,6 +18,7 @@ package options
 
 import (
 	"fmt"
+	"io/ioutil"
 	"k8s.io/api/extensions/v1beta1"
 	"os"
 	"path/filepath"
@@ -36,6 +37,7 @@ import (
 )
 
 const INPUT_SEPARATOR = ":"
+const YAML_SEPARATOR = "---"
 
 type ClusterCapacityConfig struct {
 	ReplicatedPods []*framework.ReplicatedPod
@@ -50,6 +52,7 @@ type ClusterCapacityOptions struct {
 	Verbose                    bool
 	ReplicaSetFiles            []string
 	SimulatedNodes             []string
+	Namespace                  string
 	OutputFormat               string
 }
 
@@ -60,13 +63,14 @@ func NewClusterCapacityConfig(opt *ClusterCapacityOptions) *ClusterCapacityConfi
 }
 
 func NewClusterCapacityOptions() *ClusterCapacityOptions {
-	return &ClusterCapacityOptions{}
+	return &ClusterCapacityOptions{Namespace: "default"}
 }
 
 func (s *ClusterCapacityOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&s.Kubeconfig, "kubeconfig", s.Kubeconfig, "Path to the kubeconfig file to use for the analysis.")
 	fs.StringArrayVar(&s.ReplicaSetFiles, "replicaset", s.ReplicaSetFiles, "Path to JSON or YAML file containing replicaset definition.")
 	fs.StringArrayVar(&s.SimulatedNodes, "simulatenode", s.SimulatedNodes, "Simulate additional cluster nodes. Replicate a node by specifying a source node and count {SOURCE_NODE_NAME}:{SIMULATED_COUNT}.")
+	fs.StringVar(&s.Namespace, "namespace", s.Namespace, "Namespace to schedule replicasets in.")
 
 	//TODO(jchaloup): uncomment this line once the multi-schedulers are fully implemented
 	//fs.StringArrayVar(&s.SchedulerConfigFile, "config", s.SchedulerConfigFile, "Paths to files containing scheduler configuration in JSON or YAML format")
@@ -92,27 +96,35 @@ func (s *ClusterCapacityConfig) ParseAPISpec(schedulerName string) error {
 }
 
 func (s *ClusterCapacityConfig) replicaConfigs(schedulerName string) ([]*framework.ReplicatedPod, error) {
-	replicatedPods := make([]*framework.ReplicatedPod, len(s.Options.ReplicaSetFiles), len(s.Options.ReplicaSetFiles))
-	for i, replicaSetFile := range s.Options.ReplicaSetFiles {
+	replicatedPods := make([]*framework.ReplicatedPod, 0)
+	for _, replicaSetFile := range s.Options.ReplicaSetFiles {
 		filename, _ := filepath.Abs(replicaSetFile)
 		spec, err := os.Open(filename)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to open replicaset file: %v", err)
 		}
-
-		decoder := yaml.NewYAMLOrJSONDecoder(spec, 4096)
-		replicaSet := &v1beta1.ReplicaSet{}
-		err = decoder.Decode(replicaSet)
+		content, err := ioutil.ReadAll(spec)
 		if err != nil {
-			return nil, fmt.Errorf("Failed to decode replicaset file: %v", err)
+			return nil, fmt.Errorf("Failed to ready replicaset file: %v", err)
 		}
-
-		pod, err := s.newReplicatedPod(schedulerName, replicaSet)
-		if err != nil {
-			return nil, err
+		documents := strings.Split(string(content), YAML_SEPARATOR)
+		for _, doc := range documents {
+			doc = strings.TrimSpace(doc)
+			if doc == "" {
+				continue
+			}
+			decoder := yaml.NewYAMLOrJSONDecoder(strings.NewReader(doc), 4096)
+			replicaSet := &v1beta1.ReplicaSet{}
+			err = decoder.Decode(replicaSet)
+			if err != nil {
+				return nil, fmt.Errorf("Failed to decode replicaset file: %v", err)
+			}
+			pod, err := s.newReplicatedPod(schedulerName, replicaSet)
+			if err != nil {
+				return nil, err
+			}
+			replicatedPods = append(replicatedPods, pod)
 		}
-
-		replicatedPods[i] = pod
 	}
 
 	return replicatedPods, nil
@@ -123,9 +135,10 @@ func (s *ClusterCapacityConfig) newReplicatedPod(schedulerName string, replicaSe
 		ObjectMeta: replicaSet.Spec.Template.ObjectMeta,
 		Spec:       replicaSet.Spec.Template.Spec,
 	}
-	if pod.ObjectMeta.Namespace == "" {
-		pod.ObjectMeta.Namespace = "default"
+	if pod.Name == "" {
+		pod.Name = replicaSet.Name
 	}
+	pod.Namespace = s.Options.Namespace
 
 	// set pod's scheduler name to cluster-capacity
 	if pod.Spec.SchedulerName == "" {

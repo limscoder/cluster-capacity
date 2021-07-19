@@ -136,7 +136,7 @@ func Run(opt *options.ClusterCapacityOptions) error {
 
 	err = conf.ParseAPISpec(v1.DefaultSchedulerName)
 	if err != nil {
-		return fmt.Errorf("Failed to parse pod spec file: %v ", err)
+		return fmt.Errorf("Failed to parse spec: %v ", err)
 	}
 
 	var cfg *restclient.Config
