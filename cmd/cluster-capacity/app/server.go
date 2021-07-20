@@ -168,7 +168,7 @@ func Run(opt *options.ClusterCapacityOptions) error {
 	if err != nil {
 		return err
 	}
-	if err := framework.ClusterCapacityReviewPrint(report, conf.Options.Verbose, conf.Options.OutputFormat); err != nil {
+	if err := framework.ClusterCapacityReviewPrint(report, conf.Options.NodeLabels, conf.Options.Verbose, conf.Options.OutputFormat); err != nil {
 		return fmt.Errorf("Error while printing: %v", err)
 	}
 	return nil

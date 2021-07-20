@@ -52,6 +52,7 @@ type ClusterCapacityOptions struct {
 	Verbose                    bool
 	ReplicaSetFiles            []string
 	SimulatedNodes             []string
+	NodeLabels                 []string
 	Namespace                  string
 	OutputFormat               string
 }
@@ -70,6 +71,8 @@ func (s *ClusterCapacityOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&s.Kubeconfig, "kubeconfig", s.Kubeconfig, "Path to the kubeconfig file to use for the analysis.")
 	fs.StringArrayVar(&s.ReplicaSetFiles, "replicaset", s.ReplicaSetFiles, "Path to JSON or YAML file containing replicaset definition.")
 	fs.StringArrayVar(&s.SimulatedNodes, "simulatenode", s.SimulatedNodes, "Simulate additional cluster nodes. Replicate a node by specifying a source node and count {SOURCE_NODE_NAME}:{SIMULATED_COUNT}.")
+	fs.StringArrayVar(&s.NodeLabels, "nodelabel", s.NodeLabels, "Aggregate cluster capacity by node label.")
+
 	fs.StringVar(&s.Namespace, "namespace", s.Namespace, "Namespace to schedule replicasets in.")
 
 	//TODO(jchaloup): uncomment this line once the multi-schedulers are fully implemented

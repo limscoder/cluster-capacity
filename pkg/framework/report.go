@@ -19,6 +19,7 @@ package framework
 import (
 	"encoding/json"
 	"fmt"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	"sort"
 	"strings"
@@ -29,7 +30,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	schedutil "k8s.io/kubernetes/pkg/scheduler/util"
 )
 
@@ -74,6 +74,7 @@ type NodeMap map[string]*framework.NodeInfo
 
 type ClusterCapacityNodeResult struct {
 	NodeName    string              `json:"nodeName"`
+	Labels      map[string]string   `json:"labels"`
 	PodCount    int                 `json:"podCount"`
 	Allocatable *framework.Resource `json:"allocatable"`
 	Requested   *framework.Resource `json:"requested"`
@@ -194,6 +195,7 @@ func parseNodesReview(nodes NodeMap) []*ClusterCapacityNodeResult {
 		}
 		result[i] = &ClusterCapacityNodeResult{
 			NodeName:    key,
+			Labels:      node.Node().Labels,
 			PodCount:    len(node.Pods),
 			Allocatable: node.Allocatable,
 			Requested:   node.Requested,
@@ -298,7 +300,7 @@ func instancesSum(replicasOnNodes []*ReplicasOnNode) int {
 	return result
 }
 
-func clusterCapacityReviewPrettyPrint(r *ClusterCapacityReview, verbose bool) {
+func clusterCapacityReviewPrettyPrint(r *ClusterCapacityReview, nodeLabels []string, verbose bool) {
 	if verbose {
 		for _, req := range r.Spec.PodRequirements {
 			fmt.Printf("%v\n", req.PodName)
@@ -344,11 +346,29 @@ func clusterCapacityReviewPrettyPrint(r *ClusterCapacityReview, verbose bool) {
 			}
 		}
 		printNodeCapacity(r.Status.Nodes)
-		printClusterCapacity(r.Status.Nodes)
+		printClusterCapacity("Cluster capacity", r.Status.Nodes)
+		printLabeledCapacity(nodeLabels, r.Status.Nodes)
+	}
+}
+func printLabeledCapacity(nodeLabels []string, nodes []*ClusterCapacityNodeResult) {
+	labeledResults := map[string][]*ClusterCapacityNodeResult{}
+	for _, node := range nodes {
+		for _, label := range nodeLabels {
+			value, ok := node.Labels[label]
+			if !ok {
+				continue
+			}
+
+			resultName := fmt.Sprintf("%s:%s", label, value)
+			labeledResults[resultName] = append(labeledResults[resultName], node)
+		}
+	}
+	for label, results := range labeledResults {
+		printClusterCapacity(label, results)
 	}
 }
 
-func printClusterCapacity(nodes []*ClusterCapacityNodeResult) {
+func printClusterCapacity(title string, nodes []*ClusterCapacityNodeResult) {
 	var (
 		clusterCPUAllocatable, clusterCPURequested, clusterCPULimit,
 		clusterMemoryAllocatable, clusterMemoryRequested, clusterMemoryLimit,
@@ -367,7 +387,7 @@ func printClusterCapacity(nodes []*ClusterCapacityNodeResult) {
 		clusterStorageLimit += node.Limits.EphemeralStorage
 	}
 
-	fmt.Printf("\nCluster capacity:\n")
+	fmt.Printf("\n%s:\n", title)
 	printCapacity(clusterCPUAllocatable, clusterCPURequested, clusterCPULimit, "CPU", "m")
 	printCapacity(clusterMemoryAllocatable, clusterMemoryRequested, clusterMemoryLimit, "Memory", "bytes")
 	printCapacity(clusterStorageAllocatable, clusterStorageRequested, clusterStorageLimit, "EphemeralStorage", "bytes")
@@ -428,14 +448,14 @@ func clusterCapacityReviewPrintYaml(r *ClusterCapacityReview) error {
 	return nil
 }
 
-func ClusterCapacityReviewPrint(r *ClusterCapacityReview, verbose bool, format string) error {
+func ClusterCapacityReviewPrint(r *ClusterCapacityReview, nodeLabels []string, verbose bool, format string) error {
 	switch format {
 	case "json":
 		return clusterCapacityReviewPrintJson(r)
 	case "yaml":
 		return clusterCapacityReviewPrintYaml(r)
 	case "":
-		clusterCapacityReviewPrettyPrint(r, verbose)
+		clusterCapacityReviewPrettyPrint(r, nodeLabels, verbose)
 		return nil
 	default:
 		return fmt.Errorf("output format %q not recognized", format)
