@@ -45,6 +45,7 @@ import (
 
 const (
 	podProvisioner = "cc.kubernetes.io/provisioned-by"
+	podTemplate = "cc.kubernetes.io/pod-template"
 )
 
 type ReplicatedPod struct {
@@ -284,6 +285,7 @@ func (c *ClusterCapacity) nextPod() error {
 	// use simulated pod name with an index to construct the name
 	pod.ObjectMeta.Name = fmt.Sprintf("%v-%v", target.Pod.Name, len(target.ScheduledPods))
 	pod.ObjectMeta.UID = types.UID(uuid.NewV4().String())
+	metav1.SetMetaDataAnnotation(&pod.ObjectMeta, podTemplate, target.Pod.Name)
 	pod.Spec.SchedulerName = c.defaultSchedulerName
 
 	// Add pod provisioner annotation

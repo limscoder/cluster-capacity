@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -62,10 +63,12 @@ type ClusterCapacityReviewStatus struct {
 	Nodes []*ClusterCapacityNodeResult `json:"nodes"`
 }
 
+type PodReplicaCount map[string]int
+
 type ClusterCapacityPodResult struct {
 	PodName string `json:"podName"`
 	// numbers of replicas on nodes
-	ReplicasOnNodes []*ReplicasOnNode `json:"replicasOnNodes"`
+	ReplicasOnNodes PodReplicaCount `json:"replicasOnNodes"`
 	// reason why no more pods could schedule (if any on this node)
 	FailSummary []FailReasonSummary `json:"failSummary"`
 }
@@ -79,11 +82,6 @@ type ClusterCapacityNodeResult struct {
 	Allocatable *framework.Resource `json:"allocatable"`
 	Requested   *framework.Resource `json:"requested"`
 	Limits      *framework.Resource `json:"limits"`
-}
-
-type ReplicasOnNode struct {
-	NodeName string `json:"nodeName"`
-	Replicas int    `json:"replicas"`
 }
 
 type FailReasonSummary struct {
@@ -211,39 +209,32 @@ func parseNodesReview(nodes NodeMap) []*ClusterCapacityNodeResult {
 }
 
 func parsePodsReview(templatePods []*v1.Pod, status Status) []*ClusterCapacityPodResult {
-	templatesCount := len(templatePods)
-	result := make([]*ClusterCapacityPodResult, 0)
-
-	for i := 0; i < templatesCount; i++ {
-		result = append(result, &ClusterCapacityPodResult{
-			ReplicasOnNodes: make([]*ReplicasOnNode, 0),
-			PodName:         templatePods[i].Name,
-		})
-	}
-
-	for i, pod := range status.Pods {
-		nodeName := pod.Spec.NodeName
-		first := true
-		for _, sum := range result[i%templatesCount].ReplicasOnNodes {
-			if sum.NodeName == nodeName {
-				sum.Replicas++
-				first = false
-			}
-		}
-		if first {
-			result[i%templatesCount].ReplicasOnNodes = append(result[i%templatesCount].ReplicasOnNodes, &ReplicasOnNode{
-				NodeName: nodeName,
-				Replicas: 1,
-			})
+	results := map[string]*ClusterCapacityPodResult{}
+	for _, tmpl := range templatePods {
+		results[tmpl.Name] = &ClusterCapacityPodResult{
+			ReplicasOnNodes: PodReplicaCount{},
+			PodName:         tmpl.Name,
 		}
 	}
 
-	slicedMessage := strings.Split(status.StopReason, "\n")
-	if len(slicedMessage) == 1 {
-		return result
+	for _, pod := range status.Pods {
+		tmplName, tFound := pod.ObjectMeta.Annotations[podTemplate]
+		if !tFound {
+			log.Fatal(fmt.Errorf("pod template annotation missing"))
+		}
+		result, rFound := results[tmplName]
+		if !rFound {
+			log.Fatal(fmt.Errorf("unknown pod template: %s", tmplName))
+		}
+
+		result.ReplicasOnNodes[pod.Spec.NodeName]++
 	}
 
-	return result
+	resultSlc := make([]*ClusterCapacityPodResult, 0)
+	for _, v := range results {
+		resultSlc = append(resultSlc, v)
+	}
+	return resultSlc
 }
 
 func getPodsRequirements(pods []*v1.Pod) []*Requirements {
@@ -292,10 +283,10 @@ func GetReport(pods []*v1.Pod, nodes NodeMap, status Status) *ClusterCapacityRev
 	}
 }
 
-func instancesSum(replicasOnNodes []*ReplicasOnNode) int {
+func instancesSum(replicasOnNodes PodReplicaCount) int {
 	result := 0
 	for _, v := range replicasOnNodes {
-		result += v.Replicas
+		result += v
 	}
 	return result
 }
@@ -341,8 +332,8 @@ func clusterCapacityReviewPrettyPrint(r *ClusterCapacityReview, nodeLabels []str
 		fmt.Printf("\nPod distribution among nodes:\n")
 		for _, pod := range r.Status.Pods {
 			fmt.Printf("%v\n", pod.PodName)
-			for _, ron := range pod.ReplicasOnNodes {
-				fmt.Printf("\t- %v: %v instance(s)\n", ron.NodeName, ron.Replicas)
+			for node, count := range pod.ReplicasOnNodes {
+				fmt.Printf("\t- %v: %v instance(s)\n", node, count)
 			}
 		}
 		printNodeCapacity(r.Status.Nodes)
