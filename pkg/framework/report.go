@@ -293,6 +293,7 @@ func instancesSum(replicasOnNodes PodReplicaCount) int {
 
 func clusterCapacityReviewPrettyPrint(r *ClusterCapacityReview, nodeLabels []string, verbose bool) {
 	if verbose {
+		fmt.Println("========== Simulation spec")
 		for _, req := range r.Spec.PodRequirements {
 			fmt.Printf("%v\n", req.PodName)
 			fmt.Printf("\trequests:\n")
@@ -303,7 +304,7 @@ func clusterCapacityReviewPrettyPrint(r *ClusterCapacityReview, nodeLabels []str
 			if req.NodeSelectors != nil {
 				fmt.Printf("\t- NodeSelector: %v\n", labels.SelectorFromSet(labels.Set(req.NodeSelectors)).String())
 			}
-			fmt.Printf("\n")
+			fmt.Println("========== Simulation result")
 		}
 	}
 
@@ -337,7 +338,7 @@ func clusterCapacityReviewPrettyPrint(r *ClusterCapacityReview, nodeLabels []str
 			}
 		}
 		printNodeCapacity(r.Status.Nodes)
-		printClusterCapacity("Cluster capacity", r.Status.Nodes)
+		printClusterCapacity("========== Cluster capacity", r.Status.Nodes)
 		printLabeledCapacity(nodeLabels, r.Status.Nodes)
 	}
 }
@@ -385,7 +386,7 @@ func printClusterCapacity(title string, nodes []*ClusterCapacityNodeResult) {
 }
 
 func printNodeCapacity(nodes []*ClusterCapacityNodeResult) {
-	fmt.Printf("\nNode capacities:\n")
+	fmt.Printf("\n========== Node capacity:\n")
 	for _, node := range nodes {
 		fmt.Printf("%s\n", node.NodeName)
 		fmt.Printf("\t- pod count: %v\n", node.PodCount)
