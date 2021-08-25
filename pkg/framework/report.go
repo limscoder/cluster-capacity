@@ -304,7 +304,7 @@ func clusterCapacityReviewPrettyPrint(r *ClusterCapacityReview, nodeLabels []str
 			if req.NodeSelectors != nil {
 				fmt.Printf("\t- NodeSelector: %v\n", labels.SelectorFromSet(labels.Set(req.NodeSelectors)).String())
 			}
-			fmt.Println("========== Simulation result")
+			fmt.Println("\n========== Simulation result")
 		}
 	}
 
@@ -386,7 +386,7 @@ func printClusterCapacity(title string, nodes []*ClusterCapacityNodeResult) {
 }
 
 func printNodeCapacity(nodes []*ClusterCapacityNodeResult) {
-	fmt.Printf("\n========== Node capacity:\n")
+	fmt.Printf("\n========== Node capacity\n")
 	for _, node := range nodes {
 		fmt.Printf("%s\n", node.NodeName)
 		fmt.Printf("\t- pod count: %v\n", node.PodCount)
