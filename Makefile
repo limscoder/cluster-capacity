@@ -11,11 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+ IMAGE_NAME ?= "cluster-capacity"
+ IMAGE_TAG ?= "latest"
 
-build:
+.PHONY: docker-build
+
+build: clean
 	GO111MODULE=auto go build -o hypercc sigs.k8s.io/cluster-capacity/cmd/hypercc
 	ln -sf hypercc cluster-capacity
 	ln -sf hypercc genpod
+
+docker-build: clean
+	GO111MODULE=auto GOOS=linux GOARCH=amd64 go build -o hypercc sigs.k8s.io/cluster-capacity/cmd/hypercc
+	docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" .
 
 run:
 	@./cluster-capacity --kubeconfig ~/.kube/config --podspec=examples/pod.yaml --verbose

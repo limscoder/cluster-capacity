@@ -17,6 +17,6 @@ FROM golang:latest
 MAINTAINER Avesh Agarwal <avagarwa@redhat.com>
 
 COPY hypercc /bin/hypercc
-RUN ln -sf /bin/hypercc /bin/cluster-capacity
-RUN ln -sf /bin/hypercc /bin/genpod
-CMD ["/bin/cluster-capacity --help"]
+COPY hypercc /bin/cluster-capacity
+COPY hypercc /bin/genpod
+ENTRYPOINT ["/bin/cluster-capacity"]

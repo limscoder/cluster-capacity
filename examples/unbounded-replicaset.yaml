@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: replicaset
+metadata:
+  name: unbounded-replicaset
+  labels:
+    app: capacity
+spec:
+  selector:
+    matchLabels:
+      app: capacity
+  template:
+    metadata:
+      name: unbounded-pod
+      labels:
+        app: capacity
+    spec:
+      containers:
+      - name: php-redis
+        image: gcr.io/google-samples/gb-frontend:v4
+        imagePullPolicy: Always
+        resources:
+          limits:
+            cpu: 300m
+            memory: 200Mi
+          requests:
+            cpu: 150m
+            memory: 100Mi
+      restartPolicy: "OnFailure"
+      dnsPolicy: "Default"

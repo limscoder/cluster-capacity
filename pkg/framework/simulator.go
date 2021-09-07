@@ -45,7 +45,19 @@ import (
 
 const (
 	podProvisioner = "cc.kubernetes.io/provisioned-by"
+	podTemplate = "cc.kubernetes.io/pod-template"
 )
+
+type ReplicatedPod struct {
+	Replicas      int
+	Pod           *v1.Pod
+	ScheduledPods []*v1.Pod
+}
+
+type SimulatedNode struct {
+	NodeName string
+	Replicas int
+}
 
 type ClusterCapacity struct {
 	// emulation strategy
@@ -58,13 +70,14 @@ type ClusterCapacity struct {
 	schedulers           map[string]*scheduler.Scheduler
 	defaultSchedulerName string
 	defaultSchedulerConf *schedconfig.CompletedConfig
-	// pod to schedule
-	simulatedPod     *v1.Pod
-	lastSimulatedPod *v1.Pod
-	maxSimulated     int
-	simulated        int
-	status           Status
-	report           *ClusterCapacityReview
+
+	// pods to schedule
+	replicatedPods []*ReplicatedPod
+	status         Status
+	report         *ClusterCapacityReview
+
+	// node configuration
+	simulatedNodes []*SimulatedNode
 
 	// analysis limitation
 	informerStopCh chan struct{}
@@ -88,10 +101,8 @@ type Status struct {
 func (c *ClusterCapacity) Report() *ClusterCapacityReview {
 	if c.report == nil {
 		// Preparation before pod sequence scheduling is done
-		pods := make([]*v1.Pod, 0)
-		pods = append(pods, c.simulatedPod)
-		c.report = GetReport(pods, c.status)
-		c.report.Spec.Replicas = int32(c.maxSimulated)
+		dump := c.schedulers[c.defaultSchedulerName].SchedulerCache.Dump()
+		c.report = GetReport(c.podTemplates(), dump.Nodes, c.status)
 	}
 
 	return c.report
@@ -217,8 +228,8 @@ func (c *ClusterCapacity) Bind(ctx context.Context, state *framework.CycleState,
 
 	c.status.Pods = append(c.status.Pods, updatedPod)
 
-	if c.maxSimulated > 0 && c.simulated >= c.maxSimulated {
-		c.status.StopReason = fmt.Sprintf("LimitReached: Maximum number of pods simulated: %v", c.maxSimulated)
+	if c.isSchedulingComplete() {
+		c.status.StopReason = fmt.Sprintf("ReplicasScheduled: All replicas scheduled")
 		c.Close()
 		c.stop <- struct{}{}
 		return nil
@@ -262,13 +273,19 @@ func (c *ClusterCapacity) Update(pod *v1.Pod, podCondition *v1.PodCondition, sch
 }
 
 func (c *ClusterCapacity) nextPod() error {
+	target := c.nextReplicatedPod()
+	if target == nil {
+		return fmt.Errorf("replica pods exhausted")
+	}
+
 	pod := v1.Pod{}
-	pod = *c.simulatedPod.DeepCopy()
+	pod = *target.Pod.DeepCopy()
 	// reset any node designation set
 	pod.Spec.NodeName = ""
 	// use simulated pod name with an index to construct the name
-	pod.ObjectMeta.Name = fmt.Sprintf("%v-%v", c.simulatedPod.Name, c.simulated)
+	pod.ObjectMeta.Name = fmt.Sprintf("%v-%v", target.Pod.Name, len(target.ScheduledPods))
 	pod.ObjectMeta.UID = types.UID(uuid.NewV4().String())
+	metav1.SetMetaDataAnnotation(&pod.ObjectMeta, podTemplate, target.Pod.Name)
 	pod.Spec.SchedulerName = c.defaultSchedulerName
 
 	// Add pod provisioner annotation
@@ -279,22 +296,45 @@ func (c *ClusterCapacity) nextPod() error {
 	// Stores the scheduler name
 	pod.ObjectMeta.Annotations[podProvisioner] = c.defaultSchedulerName
 
-	c.simulated++
-	c.lastSimulatedPod = &pod
-
+	target.ScheduledPods = append(target.ScheduledPods, &pod)
 	_, err := c.externalkubeclient.CoreV1().Pods(pod.Namespace).Create(context.TODO(), &pod, metav1.CreateOptions{})
 	return err
+}
+
+func (c *ClusterCapacity) nextReplicatedPod() *ReplicatedPod {
+	for _, replicatedPod := range c.replicatedPods {
+		if replicatedPod.Replicas < 1 || replicatedPod.Replicas > len(replicatedPod.ScheduledPods) {
+			return replicatedPod
+		}
+	}
+	return nil
+}
+
+func (c *ClusterCapacity) isSchedulingComplete() bool {
+	return c.nextReplicatedPod() == nil
+}
+
+func (c *ClusterCapacity) podTemplates() []*v1.Pod {
+	pods := make([]*v1.Pod, len(c.replicatedPods), len(c.replicatedPods))
+	for i, pod := range c.replicatedPods {
+		pods[i] = pod.Pod
+	}
+	return pods
 }
 
 func (c *ClusterCapacity) Run() error {
 	// Start all informers.
 	c.informerFactory.Start(c.informerStopCh)
 	c.informerFactory.WaitForCacheSync(c.informerStopCh)
-
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// TODO(jchaloup): remove all pods that are not scheduled yet
 	for _, scheduler := range c.schedulers {
+		err := c.simulateNodes(scheduler)
+		if err != nil {
+			return fmt.Errorf("failed to simulate node: %v", err)
+		}
+
 		go func() {
 			scheduler.Run(ctx)
 		}()
@@ -302,6 +342,7 @@ func (c *ClusterCapacity) Run() error {
 	// wait some time before at least nodes are populated
 	// TODO(jchaloup); find a better way how to do this or at least decrease it to <100ms
 	time.Sleep(100 * time.Millisecond)
+
 	// create the first simulated pod
 	err := c.nextPod()
 	if err != nil {
@@ -313,6 +354,23 @@ func (c *ClusterCapacity) Run() error {
 	<-c.stop
 	cancel()
 	close(c.stop)
+	return nil
+}
+
+func (c *ClusterCapacity) simulateNodes(scheduler *scheduler.Scheduler) error {
+	cachedNodes := scheduler.SchedulerCache.Dump().Nodes
+	for _, node := range c.simulatedNodes {
+		src, ok := cachedNodes[node.NodeName]
+		if !ok {
+			return fmt.Errorf("Simulated node source not found: %s", node.NodeName)
+		}
+		for i := 0; i <= node.Replicas; i++ {
+			simulated := src.Node().DeepCopy()
+			simulated.Name = fmt.Sprintf("%s.simulated.%v", simulated.Name, i)
+			scheduler.SchedulerCache.AddNode(simulated)
+		}
+	}
+
 	return nil
 }
 
@@ -402,7 +460,7 @@ func getRecorderFactory(cc *schedconfig.CompletedConfig) profile.RecorderFactory
 // Create new cluster capacity analysis
 // The analysis is completely independent of apiserver so no need
 // for kubeconfig nor for apiserver url
-func New(kubeSchedulerConfig *schedconfig.CompletedConfig, simulatedPod *v1.Pod, maxPods int) (*ClusterCapacity, error) {
+func New(kubeSchedulerConfig *schedconfig.CompletedConfig, replicatedPods []*ReplicatedPod, simulatedNodes []*SimulatedNode) (*ClusterCapacity, error) {
 	client := fakeclientset.NewSimpleClientset()
 	sharedInformerFactory := informers.NewSharedInformerFactory(client, 0)
 
@@ -411,9 +469,8 @@ func New(kubeSchedulerConfig *schedconfig.CompletedConfig, simulatedPod *v1.Pod,
 	cc := &ClusterCapacity{
 		strategy:           strategy.NewPredictiveStrategy(client),
 		externalkubeclient: client,
-		simulatedPod:       simulatedPod,
-		simulated:          0,
-		maxSimulated:       maxPods,
+		replicatedPods:     replicatedPods,
+		simulatedNodes: 	simulatedNodes,
 		stop:               make(chan struct{}),
 		informerFactory:    sharedInformerFactory,
 		informerStopCh:     make(chan struct{}),
